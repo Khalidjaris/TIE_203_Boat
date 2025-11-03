@@ -1,0 +1,149 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+// =======================================================
+// 🔧 Configuration
+// =======================================================
+constexpr char WIFI_SSID[] = "TieLab";
+constexpr char WIFI_PASSWORD[] = "tielab2024";
+
+constexpr char TOKEN[] = "GNrGWAMZkYwtD2tQqpoH";
+constexpr char THINGSBOARD_SERVER[] = "eu.thingsboard.cloud";
+constexpr uint16_t THINGSBOARD_PORT = 1883U;
+constexpr uint32_t MAX_MESSAGE_SIZE = 1024U;
+constexpr uint32_t SERIAL_DEBUG_BAUD = 115200U;
+
+// =======================================================
+// 🧭 Serial Setup
+// =======================================================
+HardwareSerial &IMU = Serial2;
+static const int IMU_RX = 19;   // IMU TX → ESP32 RX
+static const int IMU_TX = 23;   // IMU RX ← ESP32 TX
+static const uint32_t IMU_BAUD = 115200;
+
+// =======================================================
+// 📊 Variables
+// =======================================================
+float yawRate = 0.0;
+float temperature = 0.0;
+float Speed = 0.0;
+float Yaw = 0.0;
+int leftPWM = 0;
+int rightPWM = 0;
+
+// =======================================================
+// 🌐 Network & MQTT Setup
+// =======================================================
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// =======================================================
+// ⚙️ Connection Helpers
+// =======================================================
+void connectWiFi() {
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi connected!");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void connectThingsBoard() {
+  while (!client.connected()) {
+    Serial.print("Connecting to ThingsBoard...");
+    if (client.connect("ESP32Client", TOKEN, NULL)) {
+      Serial.println(" ✅ Connected!");
+    } else {
+      Serial.print(" ❌ Failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" retrying in 5s...");
+      delay(5000);
+    }
+  }
+}
+
+// =======================================================
+// 🧮 IMU Data Parsing (6 comma-separated values)
+// Format: yawRate,temp,Speedh,Yaw,leftPWM,rightPWM
+// =======================================================
+bool parseIMUData(String s) {
+  s.trim();
+  if (!s.length()) return false;
+
+  int n = sscanf(s.c_str(), "%f,%f,%f,%f,%d,%d",
+                 &Speed, &Yaw, &yawRate, &temperature, &leftPWM, &rightPWM);
+
+  return (n == 6);
+}
+
+void readIMUOnce() {
+  if (!IMU.available()) return;
+
+  String line = IMU.readStringUntil('\n');
+  if (parseIMUData(line)) {
+    Serial.print("📥 Parsed: ");
+    Serial.println(line);
+    Serial.printf("Speed=%.2f  | Yaw=%.2f | yawRate=%.2f | temp=%.2f| L=%d | R=%d\n",
+                  Speed, Yaw, yawRate, temperature, leftPWM, rightPWM);
+  } else {
+    Serial.print("⚠️ Invalid line: ");
+    Serial.println(line);
+  }
+}
+
+// =======================================================
+// ☁️ Publish to ThingsBoard
+// =======================================================
+void publishData() {
+  if (!client.connected()) return;
+
+  String payload = "{";
+  payload += "\"Speed\":" + String(Speed, 3) + ",";
+  payload += "\"Yaw\":" + String(Yaw, 3) + ",";
+  payload += "\"yawRate\":" + String(yawRate, 3) + ",";
+  payload += "\"temperature\":" + String(temperature, 2) + ",";
+  payload += "\"leftPWM\":" + String(leftPWM) + ",";
+  payload += "\"rightPWM\":" + String(rightPWM);
+  payload += "}";
+
+  Serial.println("📤 Publishing to ThingsBoard:");
+  Serial.println(payload);
+
+  client.publish("v1/devices/me/telemetry", payload.c_str());
+}
+
+// =======================================================
+// 🚀 Setup & Loop
+// =======================================================
+void setup() {
+  Serial.begin(SERIAL_DEBUG_BAUD);
+  delay(500);
+  Serial.println("\n=== ESP32 → ThingsBoard (6-value IMU upload) ===");
+
+  IMU.begin(IMU_BAUD, SERIAL_8N1, IMU_RX, IMU_TX);
+  IMU.setTimeout(50);
+  Serial.println("Serial2 initialized for IMU.");
+
+  connectWiFi();
+  client.setServer(THINGSBOARD_SERVER, THINGSBOARD_PORT);
+  connectThingsBoard();
+}
+
+unsigned long lastSend = 0;
+
+void loop() {
+  if (!client.connected()) connectThingsBoard();
+  client.loop();
+
+  readIMUOnce();
+
+  if (millis() - lastSend > 3000) {  // send every 3 seconds
+    publishData();
+    lastSend = millis();
+  }
+}
