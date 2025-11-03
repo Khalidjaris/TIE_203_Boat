@@ -1,0 +1,268 @@
+int enA = 27;
+int in1 = 14; int in2 = 12;
+int enB = 33;
+int in3 = 26; int in4 = 25;
+
+int hatch_pin = 34;
+
+float k = 0.1;
+
+int deviation = 20;
+// int right_baseline = 142;
+int right_baseline = 150;
+// int left_baseline = 220;
+int left_baseline = 150;
+float rightPWM = right_baseline;
+float leftPWM = left_baseline;
+
+float Kp = 0.05f;    // PWM per degree of yaw error
+float Kd = 1.5f;   // PWM per deg/s of yaw rate
+
+int count_delay = 0;
+int count_imu = 0;
+bool manual_mode = 1;
+
+void setup() {
+  Serial.begin(115200); // Printing in the serial monitor
+  Serial1.begin(115200, SERIAL_8N1, 16, 17); // IMU Communcation
+  Serial2.begin(115200, SERIAL_8N1, 4, 19); // LORA Communication
+
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+  pinMode(hatch_pin, OUTPUT); 
+ 
+  // ledcAttachChannel(enA, freq, resolution, pwnChannelA);
+  ledcAttachChannel(enA, 500, 8, 0);
+  ledcAttachChannel(enB, 500, 8, 1);
+
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, LOW);
+
+  ledcWrite(enA, 0);
+  ledcWrite(enB, 0);
+}
+
+void reverse(int motor, int speed) {
+  if (motor == 1) {
+    ledcWrite(enA, speed);
+    digitalWrite(in1, HIGH);
+    digitalWrite(in2, LOW);
+  } 
+  else if (motor == 2) {
+    ledcWrite(enB, speed);
+    digitalWrite(in3, HIGH);
+    digitalWrite(in4, LOW);
+  }
+}
+
+void forward(int motor, int speed) {
+  if (motor == 1) {
+    ledcWrite(enA, speed);
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+  } 
+  else if (motor == 2) {
+    ledcWrite(enB, speed);
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, HIGH);
+  }
+}
+
+void stop(int motor) {
+  if (motor == 1) {
+    ledcWrite(enA, 0);
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, LOW);
+  } 
+  else if (motor == 2) {
+    ledcWrite(enB, 0);
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, LOW);
+  }
+}
+
+void change_PWM(int r, int l) {
+  rightPWM += r;
+  leftPWM += l;
+  if (rightPWM > right_baseline + deviation)
+    rightPWM = right_baseline + deviation;
+  if (leftPWM > left_baseline + deviation)
+    leftPWM = left_baseline + deviation;
+  if (rightPWM < right_baseline - deviation)
+    rightPWM = right_baseline - deviation;
+  if (leftPWM < left_baseline - deviation)
+    leftPWM = left_baseline - deviation;
+}
+
+// motor A is right motor
+void loop() {
+
+  if (Serial1.available()) {
+    // IMU Data
+    String line = Serial1.readStringUntil('\n');
+    line.trim();
+    float v_total, yaw, yawRate, temp;
+    sscanf(line.c_str(), "%f,%f,%f,%f", &v_total, &yaw, &yawRate, &temp);
+
+    if (!manual_mode) {
+      // Convert yaw to [-180,180] so the error is shortest-turn
+      if (yaw > 180)
+        yaw -= 360;
+
+      // PD control: u = Kp*error - Kd*yawRate
+      float u = Kp * (yaw) - Kd * yawRate;  // target heading = 0°
+
+      // Compute from baseline fresh each loop (no accumulation drift)
+      rightPWM = right_baseline - u;
+      leftPWM  = left_baseline + u;
+
+      // // Hard-coded Yaw
+      // int hardcoded_yaw = -51;
+      // if(yaw < -61 || yaw < )
+
+
+      if (rightPWM > right_baseline + deviation)
+        rightPWM = right_baseline + deviation;
+      if (leftPWM > left_baseline + deviation)
+        leftPWM = left_baseline + deviation;
+      if (rightPWM < right_baseline - deviation)
+        rightPWM = right_baseline - deviation;
+      if (leftPWM < left_baseline - deviation)
+        leftPWM = left_baseline - deviation;
+
+      // Printing in the serial monitor
+      // v_total, yaw, yawRate, temp
+      if (count_imu > 4) {
+        Serial.print("v_total (m/s): "); Serial.print(v_total, 3);
+        Serial.print(" | Yaw(deg): "); Serial.print(yaw, 1);
+        Serial.print(" | YawRate(rad/s): "); Serial.print(yawRate, 4);
+        Serial.print(" | TempC: "); Serial.print(temp, 5);
+
+        Serial.print(" | LeftPWM: "); Serial.print(leftPWM);
+        Serial.print(" | RightPWM: "); Serial.print(rightPWM);
+        Serial.print(" | u: "); Serial.println(u);
+        count_imu= 0;
+      }
+      else {
+        count_imu += 1;
+      }
+    }
+
+    // LORA Communication
+    if(count_delay > 4) {
+      // Serial2.print((int) leftPWM);
+      // Serial2.print(",");
+      // Serial2.println((int) rightPWM);
+      Serial2.printf("%.2f,%.2f,%.2f,%.2f,%d,%d\n", v_total, yaw, yawRate, temp, (int) leftPWM, (int) rightPWM);
+      count_delay = 0;
+    }
+    else {
+      count_delay += 1;
+    }   
+  }
+
+  if (Serial2.available()) {
+    String message = Serial2.readStringUntil('\n');
+    message.trim();
+    message.toUpperCase();  // make input case-insensitive
+    Serial.println(message);
+
+    // Loop through each character in the message
+    for (int i = 0; i < message.length(); i++) {
+      char c = message[i];
+
+      switch (c) {
+        case 'Q':
+          stop(1);
+          stop(2);
+          Serial.print(F("[Q] Stopping."));
+          Serial.print(rightPWM);
+          Serial.print(F("  LeftPWM: "));
+          Serial.println(leftPWM);
+          break;
+
+        case 'W':
+          // +1 (increase forward speed)
+          change_PWM(1, 1);
+          Serial.print(F("[W] Speeding up. | RightPWM: "));
+          Serial.print(rightPWM);
+          Serial.print(F("  LeftPWM: "));
+          Serial.println(leftPWM);
+          
+          forward(1, (int) rightPWM);
+          forward(2, (int) leftPWM);    
+          break;
+
+        case 'S':
+          // -1 (decrease forward speed)
+          change_PWM(-1, -1);
+          Serial.print(F("[S] Slowing down. | RightPWM: "));
+          Serial.print(rightPWM);
+          Serial.print(F("  LeftPWM: "));
+          Serial.println(leftPWM);
+
+          forward(1, (int) rightPWM);
+          forward(2, (int) leftPWM);    
+          break;
+
+        case 'A':
+          // -5/+5 (turn left)
+          change_PWM(1, -1);
+          Serial.print(F("[A] Left turn increase. | RightPWM: "));
+          Serial.print(rightPWM);
+          Serial.print(F("  LeftPWM: "));
+          Serial.println(leftPWM);
+
+          forward(1, (int) rightPWM);
+          forward(2, (int) leftPWM);    
+          break;
+
+        case 'D':
+          // +5/-5 (turn right)
+          change_PWM(-1, 1);
+          Serial.print(F("[D] Right turn increase. | RightPWM: "));
+          Serial.print(rightPWM);
+          Serial.print(F("  LeftPWM: "));
+          Serial.println(leftPWM);
+
+          forward(1, (int) rightPWM);
+          forward(2, (int) leftPWM);    
+          break;
+
+        case 'E':
+          // Toggle between manual / IMU-corrected mode
+          manual_mode = !manual_mode;
+          if(manual_mode) 
+            Serial.println("[E] Manual Mode");
+          else 
+            Serial.println("[E] IMU Correction Mode");
+          break;
+
+        case 'X':
+          // Reverse
+          reverse(1, (int) rightPWM);
+          reverse(2, (int) leftPWM);  
+          Serial.print(F("[X] Reversing | RightPWM: "));
+          Serial.print(rightPWM);
+          Serial.print(F("  LeftPWM: "));
+          Serial.println(leftPWM);
+          break;
+
+        case 'R':
+          digitalWrite(hatch_pin, HIGH);
+          delay(200);            // waits for a second
+          digitalWrite(hatch_pin, LOW); 
+          Serial.print(F("[R] Hatch Opened"));
+          break;
+
+        default:
+          // Ignore unknown characters
+          break;
+      }
+    }
+  }
+}
