@@ -1,0 +1,146 @@
+#include <Wire.h>
+#include <Adafruit_LSM6DS3TRC.h>
+#include <Adafruit_LIS3MDL.h>
+#include <Adafruit_Sensor.h>
+#include <math.h>
+
+Adafruit_LSM6DS3TRC imu;  // accel + gyro
+Adafruit_LIS3MDL mag;     // magnetometer
+
+float mx_min = 27.07,my_min = -19.80, mz_min = -212.26;
+float mx_max = 85.56, my_max = 49.65, mz_max = -165.21;
+float mx_off = 56.31, my_off = 14.92, mz_off = -188.74;
+
+// ===================== ADDED: velocity + gravity estimate (device frame) =====================
+float vx = 0.0f, vy = 0.0f;                         // velocity along device X/Y (m/s)
+float gx_est = 0.0f, gy_est = 0.0f, gz_est = 0.0f;  // gravity estimate via low-pass
+const float g0 = 9.80665f;
+const float LPF = 0.02f;  // gravity low-pass factor (0..1), ~2%/sample @ ~100 Hz
+unsigned long lastMS = 0;
+// ============================================================================================
+
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(115200);
+  unsigned long t0 = millis();
+  while (!Serial && millis() - t0 < 3000) {}  // don't block forever
+
+  if (!imu.begin_I2C()) {
+    Serial.println("ERROR: LSM6DS3TR-C not found. Check wiring/board selection.");
+    while (1) delay(10);
+  }
+
+  if (!mag.begin_I2C()) {
+    Serial.println("ERROR: LIS3MDL not found.");
+    while (1) delay(10);
+  }
+
+  // IMU config
+  imu.setAccelRange(LSM6DS_ACCEL_RANGE_4_G);
+  imu.setGyroRange(LSM6DS_GYRO_RANGE_500_DPS);
+  imu.setAccelDataRate(LSM6DS_RATE_104_HZ);
+  imu.setGyroDataRate(LSM6DS_RATE_104_HZ);
+
+  // Magnetometer config
+  mag.setDataRate(LIS3MDL_DATARATE_155_HZ);
+  mag.setRange(LIS3MDL_RANGE_4_GAUSS);
+  mag.setPerformanceMode(LIS3MDL_HIGHMODE);
+  mag.setOperationMode(LIS3MDL_CONTINUOUSMODE);
+
+  Serial.println("XIAO/Feather Sense IMU+MAG ready.");
+  Serial.println("Printing: speed, yaw, yaw_rate, temp");
+  delay(100);
+
+  // ===================== ADDED: init timestamp for velocity integration =====================
+  lastMS = millis();
+  // ==========================================================================================
+}
+
+void loop() {
+  sensors_event_t accel, gyro, temp, magnetic;
+  imu.getEvent(&accel, &gyro, &temp);
+  mag.getEvent(&magnetic);
+
+  // --- Normalize accel (gravity direction) ---
+  float ax = accel.acceleration.x;
+  float ay = accel.acceleration.y;
+  float az = accel.acceleration.z;
+  float an = sqrtf(ax * ax + ay * ay + az * az);
+  if (an > 1e-6f) {
+    ax /= an;
+    ay /= an;
+    az /= an;
+  }
+
+  // Roll (X) & Pitch (Y) from accel
+  float roll = atan2f(ay, az);
+  float pitch = asinf(-ax);
+
+  // --- Calibrated magnetometer ---
+  float mx = magnetic.magnetic.x - mx_off;
+  float my = magnetic.magnetic.y - my_off;
+  float mz = magnetic.magnetic.z - mz_off;
+
+  // Tilt compensation: rotate mag into horizontal plane
+  float mx2 = mx * cosf(pitch) + mz * sinf(pitch);
+  float my2 = mx * sinf(roll) * sinf(pitch) + my * cosf(roll) - mz * sinf(roll) * cosf(pitch);
+
+  // Magnetic heading (yaw), degrees in [0,360)
+  float yaw = atan2f(-my2, mx2) * 180.0f / PI;
+  if (yaw < 0) yaw += 360.0f;
+
+  // Yaw rate from gyro Z (rad/s)
+  float yawRate = gyro.gyro.z;
+
+  // ===================== ADDED: device-frame X/Y velocity (no rotation math) =================
+  // dt
+  unsigned long now = millis();
+  float dt = (now - lastMS) / 1000.0f;
+  lastMS = now;
+  if (dt > 0) {
+    // 1) Gravity estimate via low-pass on raw accel (device frame)
+    gx_est = (1.0f - LPF) * gx_est + LPF * accel.acceleration.x;
+    gy_est = (1.0f - LPF) * gy_est + LPF * accel.acceleration.y;
+    gz_est = (1.0f - LPF) * gz_est + LPF * accel.acceleration.z;
+
+    // 2) Linear acceleration (device axes)
+    float ax_lin = accel.acceleration.x - gx_est;
+    float ay_lin = accel.acceleration.y - gy_est;
+
+    // 3) Integrate to velocity (device axes)
+    vx += ax_lin * dt;
+    vy += ay_lin * dt;
+
+    // 4) ZUPT: zero velocities if likely stationary to limit drift
+    float gyro_norm = sqrtf(gyro.gyro.x * gyro.gyro.x + gyro.gyro.y * gyro.gyro.y + gyro.gyro.z * gyro.gyro.z);
+    float acc_norm = sqrtf(accel.acceleration.x * accel.acceleration.x + accel.acceleration.y * accel.acceleration.y + accel.acceleration.z * accel.acceleration.z);
+    bool stationary = (gyro_norm < 0.15f) && (fabsf(acc_norm - g0) < 0.3f);
+    if (stationary) {
+      vx = 0.0f;
+      vy = 0.0f;
+    }
+  }
+  // ==========================================================================================
+
+  // Printing: speed, yaw, yaw_rate, temp––
+  float v_total = sqrt(vx * vx + vy * vy);
+  Serial.print(v_total, 3);
+  Serial.print(", ");
+  Serial.print(yaw, 1);
+  Serial.print(", ");
+  Serial.print(yawRate, 4);
+  Serial.print(", ");
+  Serial.println(temp.temperature);
+
+  // In ESP32 Serial Monitor
+  Serial1.print(v_total, 3);
+  Serial1.print(", ");
+  Serial1.print(yaw, 1);
+  Serial1.print(", ");
+  Serial1.print(yawRate, 4);
+  Serial1.print(", ");
+  Serial1.println(temp.temperature);
+
+  // Reduced from 200 to 600 to facilitate LORA Communication
+  delay(600);
+}
