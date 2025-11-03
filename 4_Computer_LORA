@@ -1,0 +1,77 @@
+#include <Arduino.h>
+#include <RadioLib.h>
+#include <ArduinoJson.h>
+
+#define LORA_FREQUENCY     878.1
+#define LORA_BANDWIDTH     125.0
+#define LORA_SPREADING     7
+#define LORA_CODING_RATE   5
+#define LORA_TX_POWER      10
+#define LORA_PREAMBLE_LEN  8
+#define LORA_SYNC_WORD     RADIOLIB_SX126X_SYNC_WORD_PRIVATE
+#define LORA_TCXO_VOLT     1.6
+#define LORA_USE_LDO       false
+
+#define LORA_NSS   41
+#define LORA_DIO1  39
+#define LORA_NRST  42
+#define LORA_BUSY  40
+
+SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
+constexpr size_t DOC_CAPACITY = JSON_OBJECT_SIZE(6);
+StaticJsonDocument<DOC_CAPACITY> doc;
+
+volatile bool rxFlag = false;
+IRAM_ATTR void onPacket() { rxFlag = true; }
+
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(115200, SERIAL_8N1, 44, 43);
+  while (!Serial);
+  Serial.println(F("Node A (Serial ↔️ LoRa)"));
+
+  radio.setDio2AsRfSwitch(true);
+  int16_t st = radio.begin(LORA_FREQUENCY, LORA_BANDWIDTH, LORA_SPREADING,
+                           LORA_CODING_RATE, LORA_SYNC_WORD, LORA_TX_POWER,
+                           LORA_PREAMBLE_LEN, LORA_TCXO_VOLT, LORA_USE_LDO);
+  if (st != RADIOLIB_ERR_NONE) {
+    Serial.printf("LoRa init failed: %d\n", st);
+    while (true) delay(1000);
+  }
+  radio.setCRC(true);
+  radio.setPacketReceivedAction(onPacket);
+  radio.startReceive();
+}
+
+void loop() {
+  // ---- send anything typed in Serial monitor ----
+  if (Serial.available()) {
+    String msg = Serial.readStringUntil('\n');
+    msg.trim();
+    if (msg.length()) {
+      doc.clear();
+      doc["id"] = "nodeA";
+      doc["data"] = msg;
+      char buffer[128];
+      serializeJson(doc, buffer);
+      Serial.printf("[TX] %s\n", buffer);
+      radio.transmit(buffer);
+      radio.startReceive();
+    }
+  }
+
+  // ---- if a LoRa packet arrives ----
+  if (rxFlag) {
+    rxFlag = false;
+    String packet;
+    if (radio.readData(packet) == RADIOLIB_ERR_NONE) {
+      DeserializationError e = deserializeJson(doc, packet);
+      if (!e) {
+        const char* data = doc["data"];
+        Serial.printf("[RX] %s\n", data);
+        Serial1.println(data);
+      }
+    }
+    radio.startReceive();
+  }
+}
