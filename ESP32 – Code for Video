@@ -1,0 +1,183 @@
+// ====== Pins ======
+int enA = 18;
+int in1 = 19; int in2 = 21;
+int enB = 5;
+int in3 = 4; int in4 = 2;
+
+int hatch_pin = 23;
+
+// ====== Motion/PWM params ======
+int deviation       = 20;
+int right_baseline  = 142;
+int left_baseline   = 220;
+float rightPWM      = right_baseline;
+float leftPWM       = left_baseline;
+
+// ====== Setup ======
+void setup() {
+  Serial.begin(115200);                         // debug to USB
+  Serial2.begin(115200, SERIAL_8N1, 34, 25);    // LORA / remote control
+
+  pinMode(in1, OUTPUT); pinMode(in2, OUTPUT);
+  pinMode(in3, OUTPUT); pinMode(in4, OUTPUT);
+  pinMode(hatch_pin, OUTPUT); 
+ 
+  // ledcAttachChannel(pin, freq, resolution_bits, channel)
+  ledcAttachChannel(enA, 500, 8, 0);
+  ledcAttachChannel(enB, 500, 8, 1);
+
+  digitalWrite(in1, LOW); digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW); digitalWrite(in4, LOW);
+
+  ledcWrite(enA, 0);
+  ledcWrite(enB, 0);
+}
+
+// ====== Motor helpers ======
+void reverse(int motor, int speed) {
+  if (motor == 1) {
+    ledcWrite(enA, speed);
+    digitalWrite(in1, HIGH);
+    digitalWrite(in2, LOW);
+  } else if (motor == 2) {
+    ledcWrite(enB, speed);
+    digitalWrite(in3, HIGH);
+    digitalWrite(in4, LOW);
+  }
+}
+
+void forward(int motor, int speed) {
+  if (motor == 1) {
+    ledcWrite(enA, speed);
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+  } else if (motor == 2) {
+    ledcWrite(enB, speed);
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, HIGH);
+  }
+}
+
+void stop(int motor) {
+  if (motor == 1) {
+    ledcWrite(enA, 0);
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, LOW);
+  } else if (motor == 2) {
+    ledcWrite(enB, 0);
+    digitalWrite(in3, LOW);
+    digitalWrite(in4, LOW);
+  }
+}
+
+// Simple numeric check: optional +/- then digits (no decimals)
+bool isNumericInt(const String& s) {
+  if (s.length() == 0) return false;
+  int i = 0;
+  if (s[0] == '+' || s[0] == '-') i = 1;
+  if (i >= s.length()) return false;
+  for (; i < s.length(); i++) {
+    if (!isDigit(s[i])) return false;
+  }
+  return true;
+}
+
+// ====== Main loop ======
+void loop() {
+  if (Serial2.available()) {
+    String message = Serial2.readStringUntil('\n');
+    message.trim();
+    message.toUpperCase();  // case-insensitive
+    Serial.println(message);
+
+    // --- First: handle "N1,N2" direct PWM command (left,right) ---
+    int commaIndex = message.indexOf(',');
+    if (commaIndex != -1) {
+      String leftStr  = message.substring(0, commaIndex);  leftStr.trim();
+      String rightStr = message.substring(commaIndex + 1); rightStr.trim();
+
+      if (isNumericInt(leftStr) && isNumericInt(rightStr)) {
+        leftPWM  = leftStr.toInt();
+        rightPWM = rightStr.toInt();
+
+        Serial.print(F("[PWM] left,right = "));
+        Serial.print((int)leftPWM);
+        Serial.print(F(","));
+        Serial.println((int)rightPWM);
+
+        forward(1, (int) rightPWM);  // motor A = right
+        forward(2, (int) leftPWM);   // motor B = left
+      }
+      // If it's not two integers, we fall through to per-char commands.
+    }
+
+    // --- Then: handle single-letter / multi-letter command stream ---
+    for (int i = 0; i < message.length(); i++) {
+      char c = message[i];
+
+      switch (c) {
+        case 'Q':
+          stop(1); stop(2);
+          Serial.println(F("[Q] Stopping both motors."));
+          break;
+
+        case 'W':
+          // speed up
+          rightPWM += 1; leftPWM += 1;
+          Serial.printf("[W] Speed up | R:%d L:%d\n", (int)rightPWM, (int)leftPWM);
+          forward(1, (int) rightPWM);
+          forward(2, (int) leftPWM);
+          break;
+
+        case 'S':
+          // slow down
+          rightPWM -= 1; leftPWM -= 1;
+          Serial.printf("[S] Slow down | R:%d L:%d\n", (int)rightPWM, (int)leftPWM);
+          forward(1, (int) rightPWM);
+          forward(2, (int) leftPWM);
+          break;
+
+        case 'A':
+          // turn left: decrease right, increase left
+          rightPWM -= 1; leftPWM += 1;
+          Serial.printf("[A] Left turn | R:%d L:%d\n", (int)rightPWM, (int)leftPWM);
+          forward(1, (int) rightPWM);
+          forward(2, (int) leftPWM);
+          break;
+
+        case 'D':
+          // turn right: increase right, decrease left
+          rightPWM += 5; leftPWM -= 5;
+          Serial.printf("[D] Right turn | R:%d L:%d\n", (int)rightPWM, (int)leftPWM);
+          forward(1, (int) rightPWM);
+          forward(2, (int) leftPWM);
+          break;
+
+        case 'X':
+          // reverse both
+          reverse(1, (int) rightPWM);
+          reverse(2, (int) leftPWM);
+          Serial.printf("[X] Reverse | R:%d L:%d\n", (int)rightPWM, (int)leftPWM);
+          break;
+
+        case 'R':
+          // hatch pulse (unchanged behavior)
+          digitalWrite(hatch_pin, HIGH);
+          delay(200);
+          digitalWrite(hatch_pin, LOW);
+          Serial.println(F("[R] Hatch pulse."));
+          break;
+
+        default:
+          // ignore other chars (including commas handled above)
+          break;
+      }
+    }
+  }
+
+  // --- Clamp PWMs around baselines with allowed deviation ---
+  if (rightPWM > right_baseline + deviation)  rightPWM = right_baseline + deviation;
+  if (leftPWM  > left_baseline  + deviation)  leftPWM  = left_baseline  + deviation;
+  if (rightPWM < right_baseline - deviation)  rightPWM = right_baseline - deviation;
+  if (leftPWM  < left_baseline  - deviation)  leftPWM  = left_baseline  - deviation;
+}
